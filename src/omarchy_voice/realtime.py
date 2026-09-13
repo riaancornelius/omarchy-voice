@@ -647,6 +647,13 @@ class RealtimeSession:
                             self._exit_code = 1
                             self._stop.set()
                         break
+                    if not self.config.barge_in and self.speaker.is_playing(ECHO_TAIL_SECONDS):
+                        self._held_frames += 1
+                        self.feedback.level(0.0)
+                        continue
+                    if self._held_frames:
+                        self.feedback.log(f"mic     held {self._held_frames} frame(s) while speaking")
+                        self._held_frames = 0
                     self._appended_audio = True
                     self.feedback.level(frame_level(chunk))
                     await self._send({

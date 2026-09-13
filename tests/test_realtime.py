@@ -11,6 +11,7 @@ Run with: python3 -m unittest discover -s tests
 """
 
 import asyncio
+import base64
 import json
 import sys
 import time
@@ -211,6 +212,48 @@ class RealtimeSessionTests(unittest.IsolatedAsyncioTestCase):
         await self.session._set_active(False)
         self.assertFalse(self.session._active_event.is_set())
         self.assertFalse(self.session.active)
+
+    async def test_mic_loop_holds_frames_while_she_is_speaking(self):
+        """The gate primitive is well tested in isolation (EchoGateTests), but
+        that proves nothing unless `_mic_loop` actually consults it. Regression
+        test for the bug where every captured frame was forwarded regardless of
+        `speaker.is_playing()`, so her own voice on speakers came back as heard
+        speech (see 'She was hearing herself' in HANDOFF.md)."""
+        self.assertFalse(self.session.config.barge_in)
+        self.session._active_event.set()
+        self.session.speaker._plays_until = time.monotonic() + 10.0  # "speaking"
+
+        held_chunk = b"\x01" * 10
+        sent_chunk = b"\x02" * 10
+        calls = 0
+
+        async def fake_read(_n):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return held_chunk
+            self.session.speaker._plays_until = time.monotonic() - 1.0  # stopped
+            self.session._active_event.clear()
+            self.session._stop.set()
+            return sent_chunk
+
+        fake_stdout = mock.Mock()
+        fake_stdout.read = fake_read
+        fake_proc = mock.Mock()
+        fake_proc.stdout = fake_stdout
+        fake_proc.returncode = None
+
+        with mock.patch.object(realtime.asyncio, "create_subprocess_exec",
+                                mock.AsyncMock(return_value=fake_proc)), \
+             mock.patch.object(realtime, "_terminate", mock.AsyncMock()):
+            await self.session._mic_loop()
+
+        appended = self.socket.events("input_audio_buffer.append")
+        self.assertEqual(len(appended), 1, appended)
+        self.assertEqual(base64.b64decode(appended[0]["audio"]), sent_chunk)
+        self.assertEqual(self.session._held_frames, 0)
+        self.assertIn("mic     held 1 frame(s) while speaking",
+                      feedback.LOG_FILE.read_text())
 
     async def test_manual_vad_commits_on_mute(self):
         self.session.config.realtime_turn_detection = "none"
