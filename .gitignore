@@ -39,3 +39,6 @@ docs/omarchy-voice.html
 build/
 dist/
 *.egg-info/
+
+# Local graphify knowledge-graph output (regeneratable, not a repo artifact)
+graphify-out/

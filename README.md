@@ -11,7 +11,8 @@ local tools carry out desktop actions through a policy gate.
 - Controls applications, windows, workspaces, and desktop settings.
 - Reads browser pages and managed terminals, with OCR when text is unavailable.
 - Discovers commands, shortcuts, and applications from your installed system.
-- Supports Realtime voice and an optional Live backend with delegated tasks.
+- Supports Realtime voice, an optional Live backend with delegated tasks, and a
+  lower-cost Gemini Live alternative.
 - Runs durable coding and analysis tasks with saved artifacts and verification.
 - Inspects physical objects through an on-demand camera preview with configurable
   cloud or local vision models, cropping, and gentle sharpening.
@@ -106,7 +107,10 @@ engine = "live"
 ```
 
 See [Live setup](docs/live.md) for model access, session limits, audio behavior,
-and switching engines. Shell execution is disabled by default. Confirmation
+and switching engines. `engine = "gemini_live"` selects a third engine backed by
+Google's Gemini Live API at a fraction of the OpenAI Realtime per-token audio
+cost; see [Gemini Live setup](docs/gemini-live.md) for its config, required
+key, and known limitations. Shell execution is disabled by default. Confirmation
 rules reduce mistakes but do not make desktop automation a sandbox.
 
 For speakers, leave `barge_in = false` under `[ears]` to reduce echo-triggered
@@ -118,6 +122,7 @@ interruptions; an [example configuration](share/echo-cancel.conf) is included.
 | Guide | Contents |
 | --- | --- |
 | [Live backend](docs/live.md) | Setup, usage controls, browser delegation, recovery |
+| [Gemini Live backend](docs/gemini-live.md) | Lower-cost speech-to-speech alternative: setup, config, limitations |
 | [Task workers](docs/task-workers.md) | Submit, inspect, cancel, and resume durable work |
 | [OMA Vision](docs/vision.md) | Camera setup, model switching, crop, privacy, and latency |
 | [Diagnostics](docs/diagnostics.md) | Troubleshooting, latency, and private logs |

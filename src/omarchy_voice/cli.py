@@ -63,6 +63,9 @@ def cmd_run(args, config) -> int:
     if config.engine == "live":
         from . import live
         return live.run(config)
+    if config.engine == "gemini_live":
+        from . import gemini_live
+        return gemini_live.run(config)
     if config.engine != "realtime":
         print(f"unknown voice engine: {config.engine}", file=sys.stderr)
         return 1
@@ -179,8 +182,18 @@ def cmd_doctor(args, config) -> int:
         print(f"  → Live model {config.live_model}, voice {config.live_voice}")
         print(f"  → backend {config.live_backend_model}, max output {config.live_max_output_tokens}")
         print("  → Live voice: $0.05/minute plus backend usage; disconnects on mute")
+    elif config.engine == "gemini_live":
+        print(f"  → (voice engine is gemini_live — see the \"gemini\" section below)")
     else:
         print(f"  → realtime model {config.realtime_model}, voice {config.realtime_voice}")
+    if config.engine == "gemini_live":
+        print(_bold("\ngemini"))
+        gemini_key = bool(os.environ.get(config.gemini_api_key_env))
+        print(f"  {_tick(gemini_key)} {config.gemini_api_key_env}"
+              + ("" if gemini_key else f"  (put it in {cfg.ENV_FILE})"))
+        print(f"  → model {config.gemini_model}, voice {config.gemini_voice}")
+        print(f"  → audio in {config.gemini_input_sample_rate}Hz, "
+              f"out {config.gemini_output_sample_rate}Hz")
     if config.tasks_enabled:
         from .tasks import validate_config
         try:
@@ -199,11 +212,17 @@ def cmd_doctor(args, config) -> int:
         print(f"  {_tick(True)} per-install safety identifier at {cfg.SAFETY_ID_FILE}")
 
     print(_bold("\nears"))
-    problems = realtime_mod.check_ready(config)
-    if config.engine == "live":
+    if config.engine == "gemini_live":
+        from . import gemini_live
+        problems = gemini_live.check_ready(config)
+    elif config.engine == "live":
         from .live import config_problems
+        problems = realtime_mod.check_ready(config)
         problems.extend(config_problems(config))
-    elif config.engine != "realtime":
+    elif config.engine == "realtime":
+        problems = realtime_mod.check_ready(config)
+    else:
+        problems = realtime_mod.check_ready(config)
         problems.append(f"unknown voice engine: {config.engine}")
     if problems:
         for problem in problems:
@@ -213,6 +232,9 @@ def cmd_doctor(args, config) -> int:
     if config.engine == "live":
         print("  → OpenAI Live with Responses delegation, toggle-only")
         print(f"  → session limit {config.live_max_session_seconds:g}s; no connection at boot")
+    elif config.engine == "gemini_live":
+        print(f"  → Google Gemini Live (speech to speech), "
+              f"turn detection {config.gemini_turn_detection}, toggle-only")
     else:
         print(f"  → OpenAI Realtime (speech to speech), "
               f"{config.realtime_turn_detection}, toggle-only")
@@ -331,7 +353,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_say)
 
     p = sub.add_parser("run", help="start the listening daemon")
-    p.add_argument("--engine", choices=("realtime", "live"),
+    p.add_argument("--engine", choices=("realtime", "live", "gemini_live"),
                    help="override the configured voice backend")
     p.set_defaults(func=cmd_run)
 

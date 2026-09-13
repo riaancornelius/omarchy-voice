@@ -117,7 +117,7 @@ RETIRED_KEYS = {
 
 # Sections whose keys are namespaced rather than flattened, because the plain
 # names are already taken by another section.
-PREFIXED_SECTIONS = {"realtime", "live", "tasks", "network", "vision"}
+PREFIXED_SECTIONS = {"realtime", "live", "tasks", "network", "vision", "gemini"}
 
 # List-valued policy keys union with the built-in lists unless the matching
 # `*_replace` flag is set. Unknown keys are kept so doctor can report typos.
@@ -231,6 +231,32 @@ class Config:
     # Empty string disables it. Shape verified against the live API:
     # session.audio.input.transcription = {"model": ...}
     realtime_transcribe_model: str = "gpt-4o-mini-transcribe"
+
+    # --- gemini --------------------------------------------------------------
+    # A second speech-to-speech engine, selected with engine = "gemini_live".
+    # Lives under [gemini] in the config file, same prefixing scheme as
+    # [realtime]/[live]/[vision]. Roughly 5-10x cheaper per audio token than
+    # gpt-realtime-2.1 at the time this was written — see docs/gemini-live.md.
+    gemini_model: str = "gemini-3.1-flash-live-preview"
+    gemini_api_key_env: str = "GEMINI_API_KEY"
+    gemini_voice: str = "Puck"
+    # Free-text delivery direction appended to the system instruction — e.g.
+    # "speak warmly and keep it brief" or "sound like a calm radio announcer".
+    # Gemini's native-audio voice follows style described in plain language;
+    # there is no separate structured style parameter for prebuilt voices.
+    # Empty by default, so nothing changes unless you set it. gemini_live
+    # only for now — realtime.py/live.py have no equivalent field.
+    gemini_voice_style: str = ""
+    # Gemini Live is asymmetric: 16kHz in, 24kHz out. realtime_sample_rate is a
+    # single field shared by both directions in the OpenAI engine, which does
+    # not fit here, so this engine gets its own pair.
+    gemini_input_sample_rate: int = 16000
+    gemini_output_sample_rate: int = 24000
+    # "high" / "low" per the Live API's Start/EndSensitivity enums, or "off" to
+    # disable automatic activity detection. There is no manual-commit fallback
+    # here yet — unlike realtime_turn_detection, "off" is not a supported mode
+    # until the manual path (activity start/end signalling) is verified.
+    gemini_turn_detection: str = "high"
 
     # --- hands -------------------------------------------------------------
     allow_shell: bool = False

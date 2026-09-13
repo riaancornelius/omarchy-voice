@@ -106,6 +106,20 @@ transcribe_model = "gpt-4o-mini-transcribe"  # user-audio transcripts; "" disabl
 # `none` commits the audio buffer when you toggle listening off, then asks
 # for a response. Toggling off stops the recorder, so nothing is captured.
 
+[gemini]
+# Only used when engine = "gemini_live" — a cheaper speech-to-speech
+# alternative to [realtime], see docs/gemini-live.md.
+model = "gemini-3.1-flash-live-preview"
+api_key_env = "GEMINI_API_KEY"
+voice = "Puck"
+input_sample_rate = 16000    # microphone capture rate
+output_sample_rate = 24000   # playback rate for the server's audio
+turn_detection = "high"      # high | low; "off" is accepted but not yet implemented
+# Free-text delivery direction, appended to the system instruction. Gemini's
+# native-audio voice follows plain-language style directives directly; there
+# is no separate structured style parameter. Empty by default.
+# voice_style = "Speak like a calm, dry-witted radio announcer."
+
 [hands]
 # The shell tool is off by default. On, the model can run arbitrary commands —
 # which is exactly as large a hole as it sounds, on an open microphone.
