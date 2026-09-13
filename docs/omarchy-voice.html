@@ -653,6 +653,7 @@ reply   Switched to workspace 4.</span></pre>
           <tr><td><span class="verdict run">VERIFIED</span></td><td>The microphone path, on a USB interface, spoken end to end</td></tr>
           <tr><td><span class="verdict run">VERIFIED</span></td><td>Window composition &mdash; <code>columns</code>, <code>main-and-side</code> and <code>grid</code>, measured on a 2560&times;1080 monitor: three equal columns land at 845/829/834 px in 2.0 s</td></tr>
           <tr><td><span class="verdict run">VERIFIED</span></td><td>The <code>omarchy voice &hellip;</code> routes, resolved against Omarchy&rsquo;s own dispatcher</td></tr>
+          <tr><td><span class="verdict run">VERIFIED</span></td><td>Clicking &mdash; <code>click_text</code> matches OCR&rsquo;d words on screen and drives the pointer through <code>ydotool</code></td></tr>
           <tr><td><span class="verdict hold">KNOWN LIMIT</span></td><td>The API&rsquo;s tokens-per-minute budget. About 8,200 tokens a turn against a 40,000 TPM tier is roughly five turns a minute; past that the daemon waits the interval the server names and retries rather than going silent</td></tr>
           <tr><td><span class="verdict hold">UNTESTED</span></td><td>The bar widget QML, which needs a running Omarchy shell to exercise</td></tr>
         </tbody>
@@ -688,7 +689,6 @@ reply   Switched to workspace 4.</span></pre>
       <div class="card">
         <h3>Next, and deliberately absent</h3>
         <ul class="tight">
-          <li><strong>Clicking.</strong> Hyprland moves the cursor but has no click dispatcher, so pointer clicks need <code>ydotool</code>. Everything here works without it, by driving apps through their own shortcuts &mdash; faster anyway. A grid overlay is the obvious next piece.</li>
           <li><strong>Speaker identification.</strong> It answers to any voice in the room.</li>
           <li><strong>A second provider.</strong> Speech-to-speech realtime is OpenAI and Gemini Live and not much else, both paid and proprietary, so an abstraction layer buys almost no coverage. <code>realtime.py</code> is the seam if that changes.</li>
         </ul>
