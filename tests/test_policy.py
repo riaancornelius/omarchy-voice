@@ -3,7 +3,13 @@
 Run with: python3 -m unittest discover -s tests
 """
 
+import os
+import shlex
+import signal
 import sys
+import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -206,6 +212,71 @@ class ShellGraceTests(unittest.TestCase):
         result = Executor._shell(["echo", "hello"], timeout=5, grace=2.0)
         self.assertTrue(result.ok)
         self.assertEqual(result.output, "hello")
+
+    def test_a_timeout_reaps_a_spawned_grandchild_too(self):
+        """omarchy's menu wrappers fork a child that outlives the tracked
+        process: `omarchy menu keybindings` forks `omarchy-menu-select`, which
+        opens an interactive picker nobody on a voice-only session can click.
+        Two failures compound: `proc.kill()` alone never reaches the
+        grandchild, and the grandchild inherits the captured stdout/stderr
+        pipes, so the follow-up `proc.communicate()` then blocks waiting for
+        those pipes to close — which only happens once the grandchild itself
+        exits. On the real machine that grandchild was an open picker waiting
+        for a click nobody could give it, so `_shell` hung long past its
+        30 s timeout, until OpenAI's own keepalive timer noticed 5 minutes
+        later and killed the websocket instead.
+
+        The grandchild here sleeps far longer than this test's patience, so a
+        pass can only mean it was actually killed - not that it happened to
+        finish on its own before the assertions ran."""
+        pidfile = Path(tempfile.mkstemp()[1])
+        script = (
+            f"(echo $BASHPID > {shlex.quote(str(pidfile))}; exec sleep 300) "
+            "& disown; sleep 300"
+        )
+        result_box: dict = {}
+
+        def run():
+            result_box["result"] = Executor._shell(["bash", "-c", script], timeout=0.3)
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        thread.join(timeout=5.0)
+
+        grandchild_pid = None
+        try:
+            self.assertFalse(
+                thread.is_alive(),
+                "_shell did not return — it is blocked waiting for the orphaned "
+                "grandchild's inherited pipes to close")
+            result = result_box["result"]
+            self.assertFalse(result.ok)
+            self.assertIn("timed out", result.output)
+
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                text = pidfile.read_text().strip()
+                if text:
+                    grandchild_pid = int(text)
+                    break
+                time.sleep(0.05)
+            self.assertIsNotNone(grandchild_pid, "grandchild never started")
+
+            time.sleep(0.2)
+            try:
+                os.kill(grandchild_pid, 0)
+                alive = True
+            except ProcessLookupError:
+                alive = False
+            self.assertFalse(
+                alive, "the forked grandchild kept running after the parent was killed")
+        finally:
+            pidfile.unlink(missing_ok=True)
+            if grandchild_pid is not None:
+                try:
+                    os.kill(grandchild_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
 
 class DesktopActionTests(unittest.TestCase):

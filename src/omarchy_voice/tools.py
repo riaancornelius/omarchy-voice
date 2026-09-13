@@ -15,6 +15,7 @@ import re
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
@@ -1408,15 +1409,24 @@ class Executor:
         every launch, and composition pays that per pane.
         """
         try:
+            # A process group of its own: some commands (omarchy's menu
+            # wrappers) exec into or spawn a detached grandchild that survives
+            # `proc.kill()`, leaving an orphaned interactive picker running
+            # after the daemon has already given up and reported a timeout.
+            # `killpg` on timeout reaches all of it.
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                    stderr=subprocess.PIPE, text=True)
+                                    stderr=subprocess.PIPE, text=True,
+                                    start_new_session=True)
         except FileNotFoundError:
             return Result(False, f"{cmd[0]} is not installed")
         try:
             stdout, stderr = proc.communicate(timeout=grace if grace is not None else timeout)
         except subprocess.TimeoutExpired:
             if grace is None:
-                proc.kill()
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
                 proc.communicate()
                 return Result(False, f"{cmd[0]} timed out")
             # Still running: a foreground application, not a hung command.
