@@ -6,7 +6,6 @@ and socket buffering can inflate it, so record those alongside each sample.
 import asyncio
 from collections import deque
 from contextlib import asynccontextmanager
-import json
 import math
 import statistics
 import time
@@ -15,6 +14,30 @@ from urllib.parse import urlsplit
 
 from .config import STATE_DIR
 from .trace import Trace
+
+# Fields shown in the human-facing feedback.log() line, per event — the full
+# record still goes to network-trace.jsonl unchanged. Repeating every
+# rolling stat (percentiles, counters) on every ~20s sample line made the log
+# wrap and hard to scan; each event here keeps only what is distinct to it.
+_COMPACT_FIELDS = {
+    "network_connected": ("endpoint_host", "handshake_ms"),
+    "network_sample": ("status", "rtt_ms", "loop_lag_ms"),
+    "network_closed": ("close_code", "duration_ms", "rtt_p50_ms", "successes", "timeouts"),
+    "network_connection_error": ("phase", "error_type"),
+    "network_probe_error": ("error_type",),
+    "network_unavailable": ("reason",),
+}
+_DISPLAY_NAMES = {"endpoint_host": "host"}
+
+
+def _compact_network_line(event: str, record: dict) -> str:
+    engine = record.get("engine", "")
+    conn = str(record.get("connection_id", ""))[:8]
+    name = event.removeprefix("network_")
+    keep = _COMPACT_FIELDS.get(event, ())
+    fields = " ".join(f"{_DISPLAY_NAMES.get(k, k)}={record[k]}" for k in keep
+                      if record.get(k) is not None)
+    return f"network {name} {engine} {conn} {fields}".rstrip()
 
 
 class SocketMonitor:
@@ -38,7 +61,7 @@ class SocketMonitor:
         def write():
             # Logging failure must never end a voice conversation.
             for sink in (lambda: self.file.write(event, **record),
-                         lambda: self.feedback.log("network " + json.dumps(dict(event=event, **record))),
+                         lambda: self.feedback.log(_compact_network_line(event, record)),
                          lambda: self.trace(event, **record) if self.trace else None):
                 try:
                     sink()

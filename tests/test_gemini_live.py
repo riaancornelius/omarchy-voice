@@ -271,6 +271,7 @@ class BargeInTests(unittest.IsolatedAsyncioTestCase):
         self.session.speaker.write = mock.AsyncMock()
         self.socket = FakeSocket()
         self.session.ws = self.socket
+        self.session._connected.set()  # simulate an already-open connection
 
     async def test_interrupted_flag_calls_speaker_interrupt(self):
         await self.session._on_server_content({"interrupted": True})
@@ -306,6 +307,7 @@ class GeminiSessionTests(unittest.IsolatedAsyncioTestCase):
         self.session.speaker.interrupt = mock.AsyncMock()
         self.socket = FakeSocket()
         self.session.ws = self.socket
+        self.session._connected.set()  # simulate an already-open connection
 
     def hold_a_reboot(self):
         """Put a confirm-gated action into the pending slot, the real way."""
@@ -547,6 +549,96 @@ class MicrophoneGateTests(unittest.IsolatedAsyncioTestCase):
             [self.FRAME] * 4, config=config, speaking=5.0)
         self.assertEqual(len(appended), 4)
         self.assertEqual(session._held_frames, 0)
+
+
+# --- connect-on-demand lifecycle ------------------------------------------------
+
+class ConnectionLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    """The daemon connects only while wanted: actively listening, or a typed
+    `say` turn in flight — not held open all day regardless of use. An idle
+    Gemini Live connection gets closed by the server roughly every 2-3
+    minutes ("policy violation"), confirmed live (2026-09); this is what
+    stops that churn.
+    """
+
+    def setUp(self):
+        patch_feedback_paths(self)
+        self.config = Config(dry_run=True, notify=False)
+        self.session = gemini_live.GeminiLiveSession(self.config)
+
+    async def test_going_active_wants_a_connection(self):
+        self.assertFalse(self.session._want_connection.is_set())
+        await self.session._set_active(True)
+        self.assertTrue(self.session._want_connection.is_set())
+
+    async def test_going_inactive_stops_wanting_a_connection(self):
+        await self.session._set_active(True)
+        self.session._session_should_end = asyncio.Event()
+        await self.session._set_active(False)
+        self.assertFalse(self.session._want_connection.is_set())
+        self.assertTrue(self.session._session_should_end.is_set())
+
+    async def test_going_inactive_with_no_session_open_does_not_error(self):
+        await self.session._set_active(True)
+        self.assertIsNone(self.session._session_should_end)
+        await self.session._set_active(False)  # must not raise
+
+    async def test_inject_without_a_connection_times_out_and_gives_up_wanting_one(self):
+        # Nothing ever sets _connected here, simulating a server that never
+        # answers — _inject() must not hang forever or leave _want_connection
+        # set behind it. Closes the un-awaited wait() coroutine itself so
+        # mocking out the real 15s timeout doesn't leak a warning.
+        def immediate_timeout(coro, timeout):
+            coro.close()
+            raise asyncio.TimeoutError
+
+        with mock.patch.object(asyncio, "wait_for", side_effect=immediate_timeout):
+            result = await self.session._inject("switch to workspace four")
+        self.assertEqual(result, "error: could not connect to gemini live")
+        self.assertFalse(self.session._want_connection.is_set())
+
+    async def test_inject_opens_a_connection_and_closes_it_after_the_turn(self):
+        socket = FakeSocket()
+        self.session.ws = socket
+        self.session._connected.set()  # a connection "opens" instantly here
+        self.session._session_should_end = asyncio.Event()
+
+        result = await self.session._inject("what time is it")
+        self.assertEqual(result, "sent")
+        self.assertTrue(self.session._want_connection.is_set())  # still open mid-turn
+
+        await self.session._on_server_content({"turnComplete": True})
+        await asyncio.sleep(0)  # let the scheduled auto-disconnect task run
+        self.assertFalse(self.session._want_connection.is_set())
+        self.assertTrue(self.session._session_should_end.is_set())
+
+    async def test_inject_does_not_close_a_connection_that_was_already_wanted(self):
+        """Listening is already on (or another turn is in flight) — a typed
+        say piggybacks on it and must not tear it down afterward."""
+        self.session._want_connection.set()
+        socket = FakeSocket()
+        self.session.ws = socket
+        self.session._connected.set()
+        self.session._session_should_end = asyncio.Event()
+
+        await self.session._inject("what time is it")
+        await self.session._on_server_content({"turnComplete": True})
+        await asyncio.sleep(0)
+        self.assertTrue(self.session._want_connection.is_set())
+        self.assertFalse(self.session._session_should_end.is_set())
+
+    async def test_inject_does_not_close_a_connection_if_listening_started_meanwhile(self):
+        socket = FakeSocket()
+        self.session.ws = socket
+        self.session._connected.set()
+        self.session._session_should_end = asyncio.Event()
+
+        await self.session._inject("what time is it")
+        self.session.active = True  # user toggled listening on before the reply arrived
+        await self.session._on_server_content({"turnComplete": True})
+        await asyncio.sleep(0)
+        self.assertTrue(self.session._want_connection.is_set())
+        self.assertFalse(self.session._session_should_end.is_set())
 
 
 # --- check_ready ---------------------------------------------------------------

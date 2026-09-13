@@ -156,6 +156,22 @@ class GeminiLiveSession:
         # Set from sessionResumptionUpdate events; not yet used to actually
         # resume a session on reconnect (see _serve()), just captured for now.
         self._resumption_handle: str | None = None
+        # Connect only while this is set — while actively listening, or for
+        # the duration of a typed `say` turn. An idle Gemini Live connection
+        # gets closed by the server roughly every 2-3 minutes ("policy
+        # violation"), confirmed live (2026-09); holding one open all day
+        # regardless of use just churns reconnects for no benefit.
+        self._want_connection = asyncio.Event()
+        # Set once a connection's setup handshake has completed; _inject()
+        # waits on this before sending a typed turn.
+        self._connected = asyncio.Event()
+        # Set on turnComplete; lets a typed turn know when it's safe to
+        # close the connection it opened for itself.
+        self._turn_done = asyncio.Event()
+        # Fresh Event per connection attempt (see _serve()); sema for "this
+        # particular connection should end", distinct from _stop (the whole
+        # daemon shutting down).
+        self._session_should_end: asyncio.Event | None = None
 
     # -- plumbing -------------------------------------------------------------
     def _on_action(self, name: str, description: str) -> None:
@@ -320,6 +336,8 @@ class GeminiLiveSession:
         elif verb == "quit":
             self._user_quit = True
             self.loop.call_soon_threadsafe(self._stop.set)
+            # Wakes _lifecycle() if it's idling with no connection open.
+            self.loop.call_soon_threadsafe(self._want_connection.set)
             return "stopping"
         else:
             return f"unknown command {verb!r}"
@@ -335,11 +353,15 @@ class GeminiLiveSession:
         self.active = active
         if active:
             self._active_event.set()
+            self._want_connection.set()
         else:
             self._active_event.clear()
             await self._kill_mic()
             await self.speaker.interrupt()
             await asyncio.to_thread(self.executor.vision.stop_owned)
+            self._want_connection.clear()
+            if self._session_should_end is not None:
+                self._session_should_end.set()
         self.feedback.state("listening" if active else "idle")
         self.feedback.notify("Listening" if active else "Sleeping")
         self.feedback.log(f"gate    {'listening' if active else 'muted'}")
@@ -348,11 +370,10 @@ class GeminiLiveSession:
     async def _inject(self, text: str) -> str:
         """`omarchy-voice listen say ...` — a typed turn, mic untouched.
 
-        Message shape (clientContent/turns/parts/text) follows the
-        BidiGenerateContent naming convention used by realtimeInput and
-        serverContent, by analogy with generateContent's `contents` shape —
-        not yet confirmed against a live session. Verify before relying on
-        typed injection in production.
+        The `clientContent`/`turns`/`parts`/`text` shape is confirmed working
+        against a live session (2026-09). If nothing is connected yet, this
+        opens a connection just for this turn and closes it again once the
+        reply finishes — unless listening got turned on in the meantime.
         """
         text = text.strip()
         if not text:
@@ -360,13 +381,36 @@ class GeminiLiveSession:
         self._user_turn_since_hold = True
         self._tool_rounds = 0
         self.feedback.log(f"typed   {text!r}")
+        opened_for_this = not self._want_connection.is_set()
+        self._want_connection.set()
+        try:
+            await asyncio.wait_for(self._connected.wait(), timeout=15)
+        except asyncio.TimeoutError:
+            if opened_for_this:
+                self._want_connection.clear()
+            return "error: could not connect to gemini live"
+        self._turn_done.clear()
         await self._send({
             "clientContent": {
                 "turns": [{"role": "user", "parts": [{"text": text}]}],
                 "turnComplete": True,
             },
         })
+        if opened_for_this:
+            asyncio.create_task(self._disconnect_after_typed_turn())
         return "sent"
+
+    async def _disconnect_after_typed_turn(self) -> None:
+        """Close a connection _inject() opened for itself, once the reply
+        finishes — unless listening got turned on while it was in flight."""
+        try:
+            await asyncio.wait_for(self._turn_done.wait(), timeout=60)
+        except asyncio.TimeoutError:
+            pass
+        if not self.active:
+            self._want_connection.clear()
+            if self._session_should_end is not None:
+                self._session_should_end.set()
 
     async def _local_confirm(self) -> str:
         """Keybind / CLI confirm — does not trust the model."""
@@ -498,6 +542,7 @@ class GeminiLiveSession:
             self._tool_rounds = 0
             self._user_turn_since_hold = True
             self._settle()
+            self._turn_done.set()
 
     async def _on_tool_call(self, tool_call: dict) -> None:
         calls = tool_call.get("functionCalls") or []
@@ -587,14 +632,14 @@ class GeminiLiveSession:
 
         control = ControlServer(self._control)
         control.start()
-        self.feedback.state("listening" if self.active else "idle")
+        self.feedback.state("idle")
         self.feedback.log(f"start   engine=gemini_live model={self.config.gemini_model} "
                           f"voice={self.config.gemini_voice} "
-                          f"dry_run={self.config.dry_run}")
+                          f"dry_run={self.config.dry_run} (connects on demand)")
         self.feedback.log("gate    muted — press SUPER + SHIFT + V to start listening")
 
         try:
-            await self._serve(url)
+            await self._lifecycle(url)
         except GeminiUnavailable:
             raise
         except asyncio.CancelledError:
@@ -613,17 +658,32 @@ class GeminiLiveSession:
             self.ws = None
         return 0 if self._user_quit else self._exit_code
 
-    async def _serve(self, url: str) -> None:
-        """Hold a session open, and rebuild it when the socket dies.
+    async def _lifecycle(self, url: str) -> None:
+        """Connect only while wanted: actively listening, or a typed `say`
+        turn in flight. An idle Gemini Live connection gets closed by the
+        server roughly every 2-3 minutes ("policy violation"), confirmed
+        live (2026-09) — holding one open all day regardless of use just
+        churns reconnects (and, apparently, 409s on the AI Studio dashboard)
+        for no benefit.
+        """
+        while not self._user_quit:
+            await self._want_connection.wait()
+            if self._user_quit:
+                return
+            await self._serve(url)
 
-        Same reconnect-with-backoff shape as realtime.py's _serve — see that
-        file's long comment for why a drop must not end the run.
+    async def _serve(self, url: str) -> None:
+        """Hold a session open for as long as it's wanted, rebuilding it if
+        the socket dies unexpectedly. Returns (not as a failure) as soon as
+        _want_connection is cleared. Otherwise the same reconnect-with-backoff
+        shape as realtime.py's _serve — see that file's long comment for why
+        an unexpected drop must not end the run.
         """
         delay = RECONNECT_BASE_DELAY
         attempt = 0
-        while not self._user_quit:
+        while not self._user_quit and self._want_connection.is_set():
             self._dropped = False
-            self._stop.clear()
+            self._session_should_end = asyncio.Event()
             connected_at = time.monotonic()
             try:
                 await self._open_one(url)
@@ -637,7 +697,7 @@ class GeminiLiveSession:
                 attempt = 0
                 delay = RECONNECT_BASE_DELAY
 
-            if self._user_quit or not self._dropped:
+            if self._user_quit or not self._dropped or not self._want_connection.is_set():
                 return
             attempt += 1
             if attempt > RECONNECT_ATTEMPTS:
@@ -668,19 +728,22 @@ class GeminiLiveSession:
                                         self.feedback, "gemini_live", endpoint=url) as ws:
                 self.ws = ws
                 await self._send(await self._setup_message())
+                self._connected.set()
                 mic_task = asyncio.create_task(self._mic_loop())
                 stopper = asyncio.create_task(self._stop.wait())
+                ender = asyncio.create_task(self._session_should_end.wait())
                 reader = asyncio.create_task(self._read(ws))
                 done, pending = await asyncio.wait(
-                    {stopper, reader}, return_when=asyncio.FIRST_COMPLETED)
+                    {stopper, ender, reader}, return_when=asyncio.FIRST_COMPLETED)
                 for task in pending:
                     task.cancel()
                 if reader in done and not reader.cancelled():
                     reader.result()
-                    if not self._user_quit:
+                    if not self._user_quit and ender not in done:
                         self._dropped = True
                         self.feedback.log("stop    the server closed the connection")
         finally:
+            self._connected.clear()
             if mic_task is not None:
                 mic_task.cancel()
             await self._kill_mic()
